@@ -473,7 +473,7 @@ u8 rtw_cfg80211_ch_switch_notify(_adapter *adapter, u8 ch, u8 bw, u8 offset,
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0))
 	cfg80211_ch_switch_notify(adapter->pnetdev, &chdef, 0, 0);
-#elif (LINUX_VERSION_CODE >= KERNEL_VERSION(5,19, 2))
+#elif (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 2))
 	cfg80211_ch_switch_notify(adapter->pnetdev, &chdef, 0);
 #else
 	cfg80211_ch_switch_notify(adapter->pnetdev, &chdef);
@@ -4471,6 +4471,47 @@ static int cfg80211_rtw_flush_pmksa(struct wiphy *wiphy,
 	return 0;
 }
 
+static int cfg80211_rtw_set_cqm_rssi_config(struct wiphy *wiphy,
+					    struct net_device *ndev,
+					    s32 rssi_thold, u32 rssi_hyst)
+{
+	_adapter *padapter = (_adapter *)rtw_netdev_priv(ndev);
+	struct rtw_wdev_priv *priv = adapter_wdev_data(padapter);
+
+	priv->cqm_rssi_thold = rssi_thold;
+	priv->cqm_rssi_hyst = rssi_hyst;
+	priv->cqm_rssi_last = 0;
+
+	return 0;
+}
+
+void rtw_cfg80211_cqm_rssi_update(_adapter *padapter, s32 rssi)
+{
+	struct rtw_wdev_priv *priv = adapter_wdev_data(padapter);
+	enum nl80211_cqm_rssi_threshold_event event;
+
+	if (priv->cqm_rssi_thold == 0)
+		return;
+
+	if (rssi < priv->cqm_rssi_thold &&
+	    (priv->cqm_rssi_last == 0 ||
+	     rssi < priv->cqm_rssi_last - priv->cqm_rssi_hyst))
+                event = NL80211_CQM_RSSI_THRESHOLD_EVENT_LOW;
+        else if (rssi > priv->cqm_rssi_thold &&
+		 (priv->cqm_rssi_last == 0 ||
+		  rssi > priv->cqm_rssi_last + priv->cqm_rssi_hyst))
+                event = NL80211_CQM_RSSI_THRESHOLD_EVENT_HIGH;
+        else
+                return;
+
+        priv->cqm_rssi_last = rssi;
+        cfg80211_cqm_rssi_notify(padapter->pnetdev, event,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0)
+				 rssi,
+#endif
+				 GFP_ATOMIC);
+}
+
 #ifdef CONFIG_AP_MODE
 void rtw_cfg80211_indicate_sta_assoc(_adapter *padapter, u8 *pmgmt_frame, uint frame_len)
 {
@@ -5262,10 +5303,10 @@ static int cfg80211_rtw_change_beacon(struct wiphy *wiphy, struct net_device *nd
 	return ret;
 }
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 2))
-static int cfg80211_rtw_stop_ap(struct wiphy *wiphy, struct net_device *ndev, unsigned int link_id)
-#else
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 19, 2))
 static int cfg80211_rtw_stop_ap(struct wiphy *wiphy, struct net_device *ndev)
+#else
+static int cfg80211_rtw_stop_ap(struct wiphy *wiphy, struct net_device *ndev, unsigned int link_id)
 #endif
 {
 	_adapter *adapter = (_adapter *)rtw_netdev_priv(ndev);
@@ -7698,6 +7739,9 @@ static int cfg80211_rtw_tdls_mgmt(struct wiphy *wiphy,
 #else
 	u8 *peer,
 #endif
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0))
+	int link_id,
+#endif
 	u8 action_code,
 	u8 dialog_token,
 	u16 status_code,
@@ -10038,13 +10082,14 @@ static struct cfg80211_ops rtw_cfg80211_ops = {
 	.set_pmksa = cfg80211_rtw_set_pmksa,
 	.del_pmksa = cfg80211_rtw_del_pmksa,
 	.flush_pmksa = cfg80211_rtw_flush_pmksa,
+	.set_cqm_rssi_config = cfg80211_rtw_set_cqm_rssi_config,
 
-#ifdef CONFIG_AP_MODE
 #ifdef RTW_VIRTUAL_INT
 	.add_virtual_intf = cfg80211_rtw_add_virtual_intf,
 	.del_virtual_intf = cfg80211_rtw_del_virtual_intf,
 #endif
 
+#ifdef CONFIG_AP_MODE
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 4, 0)) && !defined(COMPAT_KERNEL_RELEASE)
 	.add_beacon = cfg80211_rtw_add_beacon,
 	.set_beacon = cfg80211_rtw_set_beacon,
@@ -10315,7 +10360,7 @@ void rtw_wdev_unregister(struct wireless_dev *wdev)
 	rtw_cfg80211_indicate_scan_done(adapter, _TRUE);
 
 	#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 11, 0)) || defined(COMPAT_KERNEL_RELEASE)
-	#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0))
+	#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 2))
 	if (wdev->links[0].client.current_bss) {
 	#elif (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 2))
 	if (wdev->connected) {
@@ -10356,9 +10401,10 @@ int rtw_cfg80211_ndev_res_alloc(_adapter *adapter)
 		rtw_wiphy_free(wiphy);
 		adapter->wiphy = NULL;
 	}
-#endif
 
 exit:
+#endif
+
 	return ret;
 }
 
